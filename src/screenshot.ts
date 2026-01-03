@@ -67,7 +67,7 @@ export const takeScreenshot = async (
     type = "png",
     deviceScaleFactor = 2, // Default to 2x for retina quality
     transparent = true,
-    headless = false,
+    headless = true,
   } = options;
 
   // Force PNG type when transparent is enabled
@@ -94,6 +94,7 @@ export const takeScreenshot = async (
 
     // Inject CSS immediately after page load to make page background transparent
     // This ensures the PNG area outside elements is transparent
+    // The target element's background will be preserved via JavaScript
     if (transparent) {
       await page.addStyleTag({
         content: `
@@ -103,8 +104,6 @@ export const takeScreenshot = async (
           }
         `,
       });
-      // Wait for style to apply and re-render
-      await page.waitForTimeout(200);
     }
 
     // Wait longer in debug mode so you can see what's happening
@@ -119,11 +118,60 @@ export const takeScreenshot = async (
     if (selector) {
       try {
         const element = page.locator(selector);
+
+        // First check if element exists in DOM
+        const elementCount = await element.count();
+        if (elementCount === 0) {
+          console.warn(
+            `Selector "${selector}" not found in DOM, falling back to full-page screenshot`
+          );
+          throw new Error(`Element not found: ${selector}`);
+        }
+
+        // Wait for element to be visible with a reasonable timeout
+        const waitTimeout =
+          typeof selectorTimeout === "number"
+            ? selectorTimeout
+            : Math.min(timeout, 10000);
         await element.waitFor({
           state: "visible",
-          timeout:
-            typeof selectorTimeout === "number" ? selectorTimeout : timeout,
+          timeout: waitTimeout,
         });
+
+        // Verify element is still visible before screenshot
+        const isVisible = await element.isVisible();
+        if (!isVisible) {
+          console.warn(
+            `Selector "${selector}" is not visible, falling back to full-page screenshot`
+          );
+          throw new Error(`Element not visible: ${selector}`);
+        }
+
+        // If transparent, ensure parent elements have transparent backgrounds
+        // but preserve the target element's own background
+        if (transparent) {
+          await page.evaluate((sel: string) => {
+            // @ts-ignore - browser context has document/window
+            const el = document.querySelector(sel);
+            if (el) {
+              // Start from parent element, skip the target element itself
+              // @ts-ignore - browser context types
+              let current = el.parentElement;
+              // @ts-ignore - browser context has document
+              while (current && current !== document.body) {
+                // @ts-ignore - browser context has window
+                const computedStyle = window.getComputedStyle(current);
+                if (
+                  computedStyle.backgroundColor !== "transparent" &&
+                  computedStyle.backgroundColor !== "rgba(0, 0, 0, 0)"
+                ) {
+                  current.style.backgroundColor = "transparent";
+                }
+                current = current.parentElement;
+              }
+            }
+          }, selector);
+        }
 
         const elementBuffer = await element.screenshot({
           type: screenshotType,
@@ -133,7 +181,12 @@ export const takeScreenshot = async (
         });
 
         return elementBuffer as Buffer;
-      } catch {
+      } catch (error) {
+        // Log the error for debugging
+        console.warn(
+          `Failed to screenshot element "${selector}":`,
+          error instanceof Error ? error.message : String(error)
+        );
         // Fall back to full page screenshot below if element isn't found or isn't visible in time
       }
     }
@@ -172,7 +225,7 @@ export const takeScreenshotFromHtml = async (
     type = "png",
     deviceScaleFactor = 2, // Default to 2x for retina quality
     transparent = true,
-    headless = false,
+    headless = true,
   } = options;
 
   // Force PNG type when transparent is enabled
@@ -248,9 +301,6 @@ export const takeScreenshotFromHtml = async (
       waitUntil: "networkidle",
       timeout,
     });
-
-    // Wait a bit for any dynamic content to render
-    await page.waitForTimeout(500);
 
     // Target the review card element
     const element = page.locator("#review-card");
